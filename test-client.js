@@ -13,7 +13,7 @@ const {
   searchTickets,
   updateTicket,
   addInternalNote,
-} = require("./zendesk-client");
+} = require("./shared/zendesk-client");
 
 // ─── CONFIG — set these before running ───────────────────────────────────────
 
