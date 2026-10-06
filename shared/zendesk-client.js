@@ -1,17 +1,18 @@
 // shared/zendesk-client.js
 // All Zendesk REST API calls — imported by both feedback-triage and release-feedback-scan skills.
 // When Zendesk MCP lands, only this file changes. All business logic is untouched.
+//
+// AUTH: Zendesk OAuth Bearer token (ZD_OAUTH_TOKEN env var).
+// OAuth tokens may expire — Brady to confirm how Aether handles token refresh.
+// If token expiry is not managed by Aether, fall back to API token auth:
+//   Authorization: Basic base64(email/token:ZD_API_TOKEN)
 
 const BASE_URL = process.env.ZENDESK_ENV === "production"
   ? "https://7shifts.zendesk.com/api/v2"
   : "https://7shifts-sandbox.zendesk.com/api/v2";
 
-const AUTH = Buffer.from(
-  `${process.env.ZD_EMAIL}/token:${process.env.ZD_API_TOKEN}`
-).toString("base64");
-
 const HEADERS = {
-  "Authorization": `Basic ${AUTH}`,
+  "Authorization": `Bearer ${process.env.ZD_OAUTH_TOKEN}`,
   "Content-Type": "application/json",
 };
 
