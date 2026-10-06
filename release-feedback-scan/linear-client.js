@@ -1,17 +1,24 @@
 // release-feedback-scan/linear-client.js
 // Linear API calls — create Feedback Summary issue, write attachments, post artifact comment.
-// Uses Linear REST API with a personal API token stored as an env var.
+// Uses Linear GraphQL API with a service account API token stored as an env var.
+//
+// NOTE: LINEAR_API_TOKEN must be a SERVICE ACCOUNT token, not a personal token.
+// Personal tokens break if the owner leaves or revokes access.
+// Brady to provision a dedicated Aether service account in Linear.
 
 const LINEAR_API = "https://api.linear.app/graphql";
-const HEADERS = {
-  "Authorization": process.env.LINEAR_API_TOKEN,
-  "Content-Type": "application/json",
-};
+
+function getHeaders() {
+  return {
+    "Authorization": process.env.LINEAR_API_TOKEN,
+    "Content-Type": "application/json",
+  };
+}
 
 async function linearFetch(query, variables = {}) {
   const res = await fetch(LINEAR_API, {
     method: "POST",
-    headers: HEADERS,
+    headers: getHeaders(),
     body: JSON.stringify({ query, variables }),
   });
   const json = await res.json();
@@ -20,13 +27,48 @@ async function linearFetch(query, variables = {}) {
 }
 
 /**
+ * Resolve a Linear project identifier (e.g. "ENG-123") to its internal UUID.
+ * The Linear native trigger payload provides the identifier, but mutations
+ * require the UUID. This lookup bridges the gap.
+ *
+ * NOTE FOR BRADY: Confirm what exact fields the Linear native trigger sends
+ * in its payload. If it already sends the UUID as `project.id`, this function
+ * is not needed and createFeedbackSummaryIssue can use the ID directly.
+ *
+ * @param {string} identifier — e.g. "ENG-123" or raw UUID (detected automatically)
+ * @returns {Promise<string>} — UUID
+ */
+async function resolveProjectId(identifier) {
+  // If it's already a UUID, return as-is
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identifier)) {
+    return identifier;
+  }
+
+  // Otherwise look up the project by slug/identifier
+  const query = `
+    query ResolveProject($slugId: String!) {
+      project(id: $slugId) {
+        id
+        name
+      }
+    }
+  `;
+  const data = await linearFetch(query, { slugId: identifier });
+  if (!data.project) throw new Error(`Linear project not found for identifier: ${identifier}`);
+  return data.project.id;
+}
+
+/**
  * Create a Feedback Summary issue inside a Linear project.
- * @param {string} projectId  — Linear project ID
+ * @param {string} projectIdentifier — Linear project identifier OR UUID
  * @param {string} releaseTitle
  * @param {object[]} tickets  — matched ZD tickets
  * @returns {Promise<{id: string, url: string}>}
  */
-async function createFeedbackSummaryIssue(projectId, releaseTitle, tickets) {
+async function createFeedbackSummaryIssue(projectIdentifier, releaseTitle, tickets) {
+  // Resolve identifier → UUID before mutation
+  const projectId = await resolveProjectId(projectIdentifier);
+
   const query = `
     mutation CreateIssue($input: IssueCreateInput!) {
       issueCreate(input: $input) {
@@ -39,7 +81,7 @@ async function createFeedbackSummaryIssue(projectId, releaseTitle, tickets) {
       title: `Feedback Summary — ${releaseTitle}`,
       description: `Auto-created by Aether. ${tickets.length} Zendesk ticket(s) matched this release.`,
       projectId,
-      labelIds: [], // add "feedback" label ID here once confirmed with Brady
+      labelIds: [], // TODO: add "feedback" label ID once confirmed with Brady
     }
   });
   return data.issueCreate.issue;
@@ -47,6 +89,7 @@ async function createFeedbackSummaryIssue(projectId, releaseTitle, tickets) {
 
 /**
  * Write ZD ticket attachments to a Linear issue.
+ * Per-attachment errors are caught and logged — does not abort on failure.
  * @param {string} issueId
  * @param {object[]} tickets
  */
@@ -59,13 +102,17 @@ async function writeAttachments(issueId, tickets) {
     }
   `;
   for (const ticket of tickets) {
-    await linearFetch(query, {
-      input: {
-        issueId,
-        title: `ZD-${ticket.id} · ${ticket.via?.source?.from?.name ?? "Customer"} · "${ticket.subject}"`,
-        url: `https://7shifts.zendesk.com/agent/tickets/${ticket.id}`,
-      }
-    });
+    try {
+      await linearFetch(query, {
+        input: {
+          issueId,
+          title: `ZD-${ticket.id} · ${ticket.via?.source?.from?.name ?? "Customer"} · "${ticket.subject}"`,
+          url: `https://7shifts.zendesk.com/agent/tickets/${ticket.id}`,
+        }
+      });
+    } catch (err) {
+      console.error(`[linear-client] Failed to write attachment for ZD-${ticket.id}: ${err.message}`);
+    }
   }
 }
 
@@ -96,4 +143,9 @@ async function postArtifactComment(issueId, tickets, keywords) {
   await linearFetch(query, { input: { issueId, body } });
 }
 
-module.exports = { createFeedbackSummaryIssue, writeAttachments, postArtifactComment };
+module.exports = {
+  resolveProjectId,
+  createFeedbackSummaryIssue,
+  writeAttachments,
+  postArtifactComment,
+};
