@@ -24,6 +24,26 @@ async function getActiveIssues() {
   return rows;
 }
 
+/**
+ * Check if a linear_id is already active in the registry.
+ * Used by release-feedback-scan to prevent duplicate scans when both
+ * a Linear trigger and a Slack :mag: reaction fire for the same release.
+ * @param {string} linear_id
+ * @returns {Promise<boolean>}
+ */
+async function isAlreadyRegistered(linear_id) {
+  const env = process.env.ZENDESK_ENV ?? "sandbox";
+  const { rows } = await pool.query(
+    `SELECT 1 FROM release_feedback_registry
+     WHERE linear_id = $1
+     AND status = 'active'
+     AND env = $2
+     LIMIT 1`,
+    [linear_id, env]
+  );
+  return rows.length > 0;
+}
+
 // ─── Registry writes ──────────────────────────────────────────────────────────
 
 /**
@@ -49,7 +69,7 @@ async function addRegistryEntry(entry) {
 }
 
 /**
- * Mark a registry entry as closed (called by Workflow 2 when Linear issue resolves).
+ * Mark a registry entry as closed.
  * @param {string} linear_id
  */
 async function closeRegistryEntry(linear_id) {
@@ -86,7 +106,7 @@ async function logRun(run) {
 function calculateExpiry(type, p_level) {
   const now = new Date();
   if (type === "bug-as-designed") {
-    now.setDate(now.getDate() + 90); // 90-day safety cap
+    now.setDate(now.getDate() + 90);
     return now;
   }
   const forwardDays = { p1: 60, p2: 30, p3: 14, p4: 7 };
@@ -99,6 +119,7 @@ function calculateExpiry(type, p_level) {
 
 module.exports = {
   getActiveIssues,
+  isAlreadyRegistered,
   addRegistryEntry,
   closeRegistryEntry,
   logRun,
