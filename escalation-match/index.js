@@ -6,6 +6,7 @@
 // Flow:
 //   1. Receive new Zendesk ticket (subject, description, company_id)
 //   2. Fetch all open (non-Done) Linear issues with label "SXP Escalation"
+//      (cached in memory for 15 min — see matcher.js)
 //   3. Score ticket against each escalation
 //   4. If confidence ≥ 0.70: tag ticket + add internal note
 //   5. Log run
@@ -38,11 +39,22 @@ async function run(input) {
   const { ticket_id, subject, description, company_id, company_name } = input;
 
   // 1. Match against open SXP escalations
-  const { match, confidence, allMatches } = await matchEscalation({
-    subject,
-    description,
-    company_id,
-  });
+  // Graceful fallback if Linear API is down — log and exit cleanly, no crash
+  let match, confidence, allMatches;
+  try {
+    ({ match, confidence, allMatches } = await matchEscalation({
+      subject,
+      description,
+      company_id,
+    }));
+  } catch (err) {
+    console.error(`[escalation-match] Linear API unavailable: ${err.message}`);
+    return {
+      action: "no-action",
+      reason: `Linear API error — ${err.message}`,
+      tickets_tagged: 0,
+    };
+  }
 
   if (!match) {
     return {
