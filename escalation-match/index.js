@@ -6,12 +6,11 @@
 // Flow:
 //   1. Receive new Zendesk ticket (subject, description, company_id)
 //   2. Fetch all open (non-Done) Linear issues with label "SXP Escalation"
-//      (cached in memory for 15 min — see matcher.js)
 //   3. Score ticket against each escalation
 //   4. If confidence ≥ 0.70: tag ticket + add internal note
 //   5. Log run
 
-const { updateTicket, addInternalNote } = require("../shared/zendesk-client");
+const { addTags, setLinearField, addInternalNote } = require("../shared/zendesk-client");
 const { matchEscalation } = require("./matcher");
 const { buildEscalationNote } = require("./note-builder");
 
@@ -67,8 +66,11 @@ async function run(input) {
   // 2. Build tag
   const zdTag = `sxp-esc-${match.identifier.toLowerCase().replace("-", "")}`;
 
-  // 3. Tag ticket + add internal note
-  await updateTicket(ticket_id, [zdTag, "sxp-escalation"], match.url, LINEAR_FIELD_ID);
+  // 3. Tag ticket + set Linear field + add internal note
+  // addTags uses PUT /api/v2/tickets/{id}/tags — strictly additive, no race condition
+  // with feedback-triage which may write to the same ticket concurrently.
+  await addTags(ticket_id, [zdTag, "sxp-escalation"]);
+  await setLinearField(ticket_id, match.url, LINEAR_FIELD_ID);
   await addInternalNote(ticket_id, buildEscalationNote(match, confidence));
 
   return {
