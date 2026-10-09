@@ -22,7 +22,7 @@
 //   Brady to confirm the exact mechanism Aether supports for human-in-the-loop.
 //   P3/P4 auto-fire with no gate.
 
-const { searchTickets, updateTicket, addInternalNote } = require("../shared/zendesk-client");
+const { searchTickets, bulkUpdateTickets, addInternalNote } = require("../shared/zendesk-client");
 const { addRegistryEntry, logRun, isAlreadyRegistered } = require("../shared/registry-client");
 const { buildInternalNote } = require("./note-builder");
 const { extractKeywords, buildSlug, lookbackDays } = require("./scanner");
@@ -48,6 +48,7 @@ async function run(input) {
   const { trigger, linear_id, title, description, p_level, linear_url, slack_channel, slack_ts, confirmed } = input;
 
   // 1. Deduplication check — skip if already active in registry
+  // Prevents double-scan if Linear trigger + Slack :mag: both fire for same release
   const alreadyRegistered = await isAlreadyRegistered(linear_id);
   if (alreadyRegistered) {
     return {
@@ -98,18 +99,29 @@ async function run(input) {
   let tagged = 0;
   let tagErrors = [];
 
-  // 6. Tag each matched ticket — catch per-ticket errors so scan continues
+  const tagsToApply = [zdTag];
+  if (trigger === "bug-as-designed") tagsToApply.push("bug-as-designed");
+
+  // 6a. Bulk-update all matched tickets (up to 100 per call — avoids per-ticket rate limit).
+  // bulkUpdateTickets does a read-modify-write for tags here, which is safe because
+  // release-feedback-scan is the only writer during a bulk scan run (feedback-triage and
+  // escalation-match only fire on *new* tickets, not historical ones).
+  let bulkJobs = [];
+  try {
+    bulkJobs = await bulkUpdateTickets(tickets, tagsToApply, linear_url, LINEAR_FIELD_ID);
+    tagged = tickets.length;
+  } catch (err) {
+    console.error(`[release-feedback-scan] Bulk tag failed: ${err.message}`);
+    tagErrors.push({ ticket_id: "bulk", error: err.message });
+  }
+
+  // 6b. Add internal notes per ticket — individual calls, errors are caught and logged
   for (const ticket of tickets) {
     try {
-      const tags = [zdTag];
-      if (trigger === "bug-as-designed") tags.push("bug-as-designed");
-
-      await updateTicket(ticket.id, tags, linear_url, LINEAR_FIELD_ID);
       await addInternalNote(ticket.id, buildInternalNote({ title, type: trigger, linear_url, zd_tag: zdTag }, 1.0));
-      tagged++;
     } catch (err) {
       tagErrors.push({ ticket_id: ticket.id, error: err.message });
-      console.error(`[release-feedback-scan] Failed to tag ticket ${ticket.id}: ${err.message}`);
+      console.error(`[release-feedback-scan] Failed to add note to ticket ${ticket.id}: ${err.message}`);
     }
   }
 
@@ -127,6 +139,7 @@ async function run(input) {
       await postArtifactComment(linear_id, tickets, keywords);
     }
   } catch (err) {
+    // Linear write failure should not prevent registry write — log and continue
     console.error(`[release-feedback-scan] Linear write failed: ${err.message}`);
   }
 
