@@ -22,7 +22,7 @@
 // }
 
 const { getActiveIssues, logRun } = require("../shared/registry-client");
-const { updateTicket, addInternalNote } = require("../shared/zendesk-client");
+const { addTags, setLinearField, addInternalNote } = require("../shared/zendesk-client");
 const { classifyTicket, routeByConfidence } = require("./classifier");
 const { buildInternalNote } = require("./note-builder");
 
@@ -63,7 +63,10 @@ async function run(input) {
   if (issue.type === "bug-as-designed") tags.push("bug-as-designed");
 
   // 4. Write to Zendesk
-  await updateTicket(ticket_id, tags, issue.linear_url, LINEAR_FIELD_ID);
+  // addTags uses PUT /api/v2/tickets/{id}/tags — additive, no race condition
+  // with escalation-match which may write to the same ticket concurrently.
+  await addTags(ticket_id, tags);
+  await setLinearField(ticket_id, issue.linear_url, LINEAR_FIELD_ID);
 
   if (action === "auto-tag") {
     const note = buildInternalNote(issue, confidence);
